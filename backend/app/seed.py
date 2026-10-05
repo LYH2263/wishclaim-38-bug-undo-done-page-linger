@@ -1,5 +1,7 @@
 from app.db import connect
 
+UNDO_WINDOW_SECONDS = 3600
+
 def init_db():
     c = connect()
     c.executescript("""
@@ -10,22 +12,28 @@ def init_db():
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
     cols = [r["name"] for r in c.execute("PRAGMA table_info(wishes)")]
-    for col in ("fulfilled_at", "proof"):
+    for col in ("fulfilled_at", "proof", "undo_until"):
         if col not in cols:
             c.execute(f"ALTER TABLE wishes ADD COLUMN {col} TEXT")
     c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('undo_seconds','3600')")
+    # Legacy fulfilled rows: 快照按当时窗长 (3600s) 回填, 之后改设置不影响它们。
+    c.execute(
+        "UPDATE wishes SET undo_until=? WHERE status='fulfilled' AND undo_until IS NULL "
+        "AND fulfilled_at IS NOT NULL",
+        ("2020-01-01T01:30:00+00:00",),
+    )
     if c.execute("SELECT COUNT(*) c FROM wishes").fetchone()["c"] == 0:
         c.executemany(
-            "INSERT INTO wishes(title,note,status,claimer,claimed_at,expires_at,data_quality,fulfilled_at,proof) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO wishes(title,note,status,claimer,claimed_at,expires_at,data_quality,fulfilled_at,proof,undo_until) VALUES (?,?,?,?,?,?,?,?,?,?)",
             [
-                ("机械键盘", "红轴", "open", None, None, None, "clean", None, None),
-                ("围巾", "羊毛", "open", None, None, None, "clean", None, None),
-                ("脏愿望-空标题", "", "open", None, None, None, "dirty", None, None),
+                ("机械键盘", "红轴", "open", None, None, None, "clean", None, None, None),
+                ("围巾", "羊毛", "open", None, None, None, "clean", None, None, None),
+                ("脏愿望-空标题", "", "open", None, None, None, "dirty", None, None, None),
                 ("过期锁样例", "应被TTL释放", "claimed", "ghost", "2020-01-01T00:00:00+00:00",
-                 "2020-01-01T01:00:00+00:00", "dirty", None, None),
+                 "2020-01-01T01:00:00+00:00", "dirty", None, None, None),
                 ("撤销窗已过期样例", "窗外撤销应失败", "fulfilled", "ghost",
                  "2020-01-01T00:00:00+00:00", "2020-01-01T01:00:00+00:00", "clean",
-                 "2020-01-01T00:30:00+00:00", "已当面交付"),
+                 "2020-01-01T00:30:00+00:00", "已当面交付", "2020-01-01T01:30:00+00:00"),
             ],
         )
         c.execute("INSERT INTO settings(key,value) VALUES ('ttl_seconds','86400')")
