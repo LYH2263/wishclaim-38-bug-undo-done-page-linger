@@ -6,7 +6,7 @@
       <article v-for="w in rows" :key="w.id" class="card" @click="$router.push('/wishes/'+w.id)">
         <h3>{{ w.title || '（无标题）' }}</h3>
         <p>{{ w.note }}</p>
-        <span class="tag">{{ w.status }} · {{ w.data_quality }}</span>
+        <span class="tag">{{ w.status }} · {{ w.data_quality }}<template v-if="w.status==='claimed' && w.remaining_seconds!=null"> · 剩余 {{ w.remaining_seconds }}s</template></span>
       </article>
     </div>
   </div>

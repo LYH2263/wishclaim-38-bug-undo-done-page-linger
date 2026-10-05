@@ -4,7 +4,7 @@
     <p v-if="err" class="err">{{ err }}</p>
     <article v-for="w in rows" :key="w.id" class="card">
       <h3>{{ w.title }}</h3><p>{{ w.claimer }}</p>
-      <span class="tag">撤销窗剩余 {{ w.undo_remaining_seconds }}s</span>
+      <span v-if="w.undo_remaining_seconds!=null" class="tag">撤销窗剩余 {{ w.undo_remaining_seconds }}s</span>
       <button v-if="w.can_undo" class="ghost" @click="undo(w.id)">撤销</button>
     </article>
   </div>

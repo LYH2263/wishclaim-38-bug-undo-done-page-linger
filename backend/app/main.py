@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,8 +26,8 @@ def undo_seconds():
     return int(row["value"] if row else 3600)
 
 def project(rows):
-    n, u = now(), undo_seconds()
-    return [project_wish(r, n, u) for r in rows]
+    n = now()
+    return [project_wish(r, n) for r in rows]
 
 def sweep(c):
     for r in c.execute("SELECT * FROM wishes WHERE status='claimed'"):
@@ -97,27 +97,33 @@ def fulfill(wid: int, body: FulfillIn | None = None):
     c = connect()
     r = c.execute("SELECT * FROM wishes WHERE id=?", (wid,)).fetchone()
     if not r: c.close(); raise HTTPException(404, "not found")
-    if r["status"] != "claimed":
+    n = now()
+    # 撤销窗快照随核销写入行内, 事后改 undo_seconds 不影响本行。
+    deadline = (n + timedelta(seconds=undo_seconds())).isoformat()
+    # CAS: 只有仍是 claimed 才核销, 与撤销交错时必有一方失败, 不会双态。
+    cur = c.execute(
+        "UPDATE wishes SET status='fulfilled', fulfilled_at=?, proof=?, undo_deadline=? WHERE id=? AND status='claimed'",
+        (n.isoformat(), body.proof if body else "", deadline, wid))
+    if cur.rowcount == 0:
         c.close(); raise HTTPException(400, "need_claim")
-    c.execute("UPDATE wishes SET status='fulfilled', fulfilled_at=?, proof=? WHERE id=?",
-              (now().isoformat(), body.proof if body else "", wid))
     c.commit(); c.close(); return {"ok": True, "status": "fulfilled"}
 
 @app.post("/api/wishes/{wid}/undo")
 def undo(wid: int):
-    from datetime import timedelta
     c = connect()
     r = c.execute("SELECT * FROM wishes WHERE id=?", (wid,)).fetchone()
     if not r: c.close(); raise HTTPException(404, "not found")
-    gate = undo_allowed(r["status"], r["fulfilled_at"], now(), undo_seconds())
-    full = (now() + timedelta(seconds=ttl())).isoformat()
+    gate = undo_allowed(r["status"], r["undo_deadline"], now())
     if not gate["ok"]:
-        c.execute("UPDATE wishes SET expires_at=? WHERE id=?", (full, wid))
-        c.commit(); c.close()
-        raise HTTPException(400 if gate["reason"] == "not_fulfilled" else 409, gate["reason"])
+        # 窗外/非核销态: 零写入, 已完成页/举证快照/倒计时全部停在失败前。
+        c.close(); raise HTTPException(400 if gate["reason"] == "not_fulfilled" else 409, gate["reason"])
     p = undo_writeback(now(), r["fulfilled_at"], r["expires_at"])
-    c.execute("UPDATE wishes SET status=?, expires_at=? WHERE id=?",
-              (p["status"], full, wid))
+    # CAS: 只有仍是 fulfilled 才回写, 与再次核销交错时必有一方 409, 不会双态。
+    cur = c.execute(
+        "UPDATE wishes SET status=?, expires_at=?, fulfilled_at=?, proof=?, undo_deadline=? WHERE id=? AND status='fulfilled'",
+        (p["status"], p["expires_at"], None, None, None, wid))
+    if cur.rowcount == 0:
+        c.close(); raise HTTPException(409, "raced")
     c.commit(); c.close(); return p
 
 @app.get("/api/mine")
@@ -129,7 +135,7 @@ def mine(claimer: str):
 @app.get("/api/done")
 def done():
     c = connect()
-    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE status='fulfilled' OR (proof IS NOT NULL AND proof != '')")]; c.close()
+    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE status='fulfilled'")]; c.close()
     return project(rows)
 
 @app.get("/api/settings")
@@ -142,5 +148,5 @@ def rules():
         "mutex": "同一愿望同时只能被一人认领",
         "ttl": "认领超时未核销则自动释放",
         "fulfill": "核销后状态变为 fulfilled",
-        "undo": "核销后 undo_seconds 内可撤销回认领态（举证清空、TTL 继承核销前剩余），窗外不可撤销",
+        "undo": "核销后 undo_seconds 内可撤销回认领态（举证清空、TTL 继承核销前剩余、窗长按核销时写入的快照），窗外不可撤销",
     }
